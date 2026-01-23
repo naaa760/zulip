@@ -62,6 +62,7 @@ log_to_file(logger, settings.RETENTION_LOG_PATH)
 MESSAGE_BATCH_SIZE = 1000
 STREAM_MESSAGE_BATCH_SIZE = 100
 TRANSACTION_DELETION_BATCH_SIZE = 100
+TOPIC_UPDATE_BATCH_SIZE = 1000
 
 # This data structure declares the details of all database tables that
 # hang off the Message table (with a foreign key to Message being part

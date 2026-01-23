@@ -1,3 +1,5 @@
+import logging
+import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -9,6 +11,7 @@ from django.db.models.functions import Cast
 from django.utils.translation import gettext as _
 from django.utils.translation import override as override_language
 
+from zerver.lib.retention import TOPIC_UPDATE_BATCH_SIZE
 from zerver.lib.types import EditHistoryEvent, StreamMessageEditRequest
 from zerver.lib.utils import assert_is_not_none
 from zerver.models import Message, Reaction, UserMessage, UserProfile
@@ -232,7 +235,56 @@ def update_messages_for_topic_edit(
     message_ids = [edited_message.id, *messages.values_list("id", flat=True)]
 
     def propagate() -> QuerySet[Message]:
-        messages.update(**update_fields)
+        message_ids_to_update = messages.values_list("id", flat=True)
+        total_messages = len(message_ids_to_update)
+
+        logger = logging.getLogger("zulip.topic")
+        start_time = time.monotonic()
+        timeout_seconds = 30.0
+
+        if total_messages <= TOPIC_UPDATE_BATCH_SIZE:
+            # For small topics, use the original single-update approach
+            messages.update(**update_fields)
+        else:
+            # For large topics, process in batches to prevent timeouts
+            logger.info(
+                "Updating %d messages for topic edit in %s (batch size: %d)",
+                total_messages,
+                old_stream.name,
+                TOPIC_UPDATE_BATCH_SIZE,
+            )
+
+            processed_count = 0
+            for i in range(0, total_messages, TOPIC_UPDATE_BATCH_SIZE):
+                if time.monotonic() - start_time > timeout_seconds:
+                    logger.warning(
+                        "Topic update timeout in %s after processing %d/%d messages",
+                        old_stream.name,
+                        processed_count,
+                        total_messages,
+                    )
+                    
+                batch_ids = message_ids_to_update[i:i + TOPIC_UPDATE_BATCH_SIZE]
+                batch_size = len(batch_ids)
+
+                try:
+                    Message.objects.filter(id__in=batch_ids).update(**update_fields)
+                    processed_count += batch_size
+                except Exception as e:
+                    logger.error(
+                        "Failed to update batch of %d messages in topic edit for %s: %s",
+                        batch_size,
+                        old_stream.name,
+                        str(e),
+                    )
+                   
+            logger.info(
+                "Completed batch updates for topic edit in %s (%d/%d messages processed)",
+                old_stream.name,
+                processed_count,
+                total_messages,
+            )
+
         return Message.objects.filter(id__in=message_ids).select_related(
             *Message.DEFAULT_SELECT_RELATED
         )
